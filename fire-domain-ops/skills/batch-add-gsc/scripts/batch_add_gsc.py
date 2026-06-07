@@ -29,11 +29,13 @@ Credentials:
     environment variables, or direct assignment
 """
 
+import argparse
 import json
 import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -44,7 +46,8 @@ from googleapiclient.discovery import build
 # ── Configuration — EDIT THESE ────────────────────────
 SCRIPT_DIR = Path(__file__).parent
 OAUTH_JSON = SCRIPT_DIR / "OAuth.json"         # Path to Google OAuth client credentials JSON
-DOMAIN_FILE = SCRIPT_DIR / "domains.txt"        # One domain per line
+DOMAIN_FILE = Path("./gsc/domains.txt")         # 域名清单(CWD 相对; --domains 会自动写入)
+LOG_DIR = Path("./gsc/logs")                    # 运行日志目录(可 tail -F latest.log)
 TOKEN_FILE = SCRIPT_DIR / ".gsc_token.json"     # Cached OAuth token (auto-generated)
 DNS_WAIT_SECONDS = 10                           # Seconds to wait for DNS propagation
 OAUTH_PORT = 8099                               # Local port for OAuth redirect
@@ -337,10 +340,61 @@ def add_to_search_console(sc_service, domain):
         return "already exists" in str(e).lower()
 
 
-def main():
-    force_reauth = "--reauth" in sys.argv
+class _Tee:
+    """把 stdout 同时写到终端与日志文件（便于 tail -F + 后台运行留痕）。"""
+    def __init__(self, *streams):
+        self.streams = streams
 
-    # Validate config
+    def write(self, s):
+        for st in self.streams:
+            try:
+                st.write(s)
+                st.flush()
+            except Exception:
+                pass
+
+    def flush(self):
+        for st in self.streams:
+            try:
+                st.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return False
+
+
+def _setup_log(log_path=None):
+    if log_path:
+        p = Path(log_path)
+    else:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        p = LOG_DIR / f"batch-add-gsc-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    logf = open(p, "a", buffering=1, encoding="utf-8")
+    latest = p.parent / "latest.log"
+    try:
+        if latest.is_symlink() or latest.exists():
+            latest.unlink()
+        latest.symlink_to(p.name)
+    except OSError:
+        pass
+    sys.stdout = _Tee(sys.__stdout__, logf)
+    return p
+
+
+def main():
+    ap = argparse.ArgumentParser(description="批量加域名到 Google Search Console")
+    ap.add_argument("--domains", nargs="+", help="直接给域名（空格分隔），会自动写入 domains.txt")
+    ap.add_argument("--from", dest="from_file", help="从指定文件读域名（每行一个）")
+    ap.add_argument("--reauth", action="store_true", help="强制浏览器重新授权 Google")
+    ap.add_argument("--log", dest="log_path", help="日志文件路径（默认 ./gsc/logs/...）")
+    args = ap.parse_args()
+    force_reauth = args.reauth
+
+    log_path = _setup_log(args.log_path)
+
+    # Validate Google OAuth config
     has_oauth = (
         OAUTH_JSON.exists()
         or (OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET)
@@ -351,12 +405,30 @@ def main():
         print("ERROR: No Google OAuth credentials configured.")
         print("Set OAUTH_JSON, OAUTH_CLIENT_ID+SECRET, or OP_GOOGLE_ITEM.")
         sys.exit(1)
-    if not DOMAIN_FILE.exists():
-        print(f"ERROR: Domain file not found: {DOMAIN_FILE}")
-        sys.exit(1)
+
+    # 域名来源优先级：--domains > --from > domains.txt（自动建/写）
+    if args.domains:
+        raw_lines = list(args.domains)
+        DOMAIN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DOMAIN_FILE.write_text("\n".join(args.domains) + "\n", encoding="utf-8")
+        src = f"--domains（已写入 {DOMAIN_FILE}）"
+    elif args.from_file:
+        fp = Path(args.from_file)
+        if not fp.exists():
+            print(f"ERROR: --from 文件不存在: {fp}")
+            sys.exit(1)
+        raw_lines = fp.read_text(encoding="utf-8").splitlines()
+        src = str(fp)
+    else:
+        if not DOMAIN_FILE.exists():
+            print(f"ERROR: 无域名输入。用 --domains a.com b.com，或 --from <文件>，"
+                  f"或在 {DOMAIN_FILE} 填域名（每行一个）。")
+            sys.exit(1)
+        raw_lines = DOMAIN_FILE.read_text(encoding="utf-8").splitlines()
+        src = str(DOMAIN_FILE)
 
     seen, domains = set(), []
-    for line in DOMAIN_FILE.read_text().splitlines():
+    for line in raw_lines:
         if not line.strip() or line.strip().startswith("#"):
             continue
         d = normalize_domain(line)
@@ -364,11 +436,13 @@ def main():
             seen.add(d)
             domains.append(d)
     if not domains:
-        print("ERROR: Domain file is empty")
+        print("ERROR: 没有有效域名")
         sys.exit(1)
 
     print(bold("=== Batch Add to Google Search Console ==="))
-    print(dim(f"    {len(domains)} domains to process\n"))
+    print(dim(f"    来源: {src}"))
+    print(dim(f"    {len(domains)} domains to process"))
+    print(dim(f'    日志: {log_path}  (实时: tail -F "{(log_path.parent / "latest.log").resolve()}")\n'))
 
     # Credentials
     print(cyan("[1/2] Getting credentials..."))

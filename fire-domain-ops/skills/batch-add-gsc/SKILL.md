@@ -64,8 +64,7 @@ description: Use when the user wants to batch-add domains to Google Search Conso
    
    这些存在密码管理器里（如 1Password）、环境变量里、还是手动提供？
 
-3. **域名列表** — 我会创建一个空白文件供你填写。
-   默认放在工作区根目录 `./domains.txt`，放这里可以吗？
+3. **域名列表** — 直接告诉我要加哪些域名（或给我一个文件路径）；我会自动写入 `./gsc/domains.txt` 处理，不用你手动建/填文件。
 ```
 
 **1Password 集成：** 用户若用 1Password 存储凭据，通过 `op` CLI 获取：
@@ -80,52 +79,37 @@ op item get "<item-id>" --vault "<vault>" --account "<account_id>" --fields "API
 
 **注意：** 1Password 字段名区分大小写（`API key` 和 `API Key` 是不同字段）。查询失败时先获取完整 item 查看实际字段名。
 
-### 第二步：创建域名列表文件
+### 第二步：域名输入（自动，不再手填）
 
-**先向用户确认文件位置**，然后创建带注释的空白文件：
+域名直接传给脚本，脚本自动写入 `./gsc/domains.txt` 留档（自动清洗：去 `https://`/路径、转小写、去重）：
 
-```
-# domains.txt — 每行一个域名
-# 示例：
-# example.com
-# mydomain.org
-```
+- 对话/流程给的一批域名 → `--domains a.com b.com c.com`
+- 来自文件 → `--from <文件路径>`（每行一个）
+- 都不传 → 读 `./gsc/domains.txt`（兼容旧用法）
 
-告知用户：
-> 已创建 `domains.txt`，路径：`<path>`。请填入域名（每行一个），填好后告诉我。
+> 与流程1/3 串接时，把刚加/分配的那批域名直接 `--domains ...` 喂进来即可，无需让用户手动编辑文件。
 
-### 第三步：生成脚本
+### 第三步：运行（Claude 后台执行 + 实时日志）
 
-从本 skill 的 `scripts/batch_add_gsc.py` 模板复制到用户工作区，配置以下变量：
-
-- `OP_GOOGLE_ITEM` — 首选；1Password item，需包含 `client_id`、`client_secret`、`refresh_token`
-- `TOKEN_FILE` — 本地 OAuth 缓存路径（默认 `.gsc_token.json`），作为浏览器授权后的备份
-- `OAUTH_JSON` — 仅在首次初始化且 1Password 中还没有 Google OAuth 凭据时使用
-- `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` — 仅在首次初始化且没有 JSON 文件时使用
-- `DOMAIN_FILE` — 域名列表路径
-- Cloudflare 凭据 — 根据用户选择配置 `op` CLI / 环境变量 / 直接赋值
-
-脚本使用 `uv run` + PEP 723 内联依赖声明，无需手动安装包。
-
-### 第四步：运行
-
-**重要：** 脚本每个域名约需 15 秒（含 10s DNS 传播等待），40 个域名约 10 分钟。必须让用户在自己的终端运行以查看实时进度：
+直接从插件运行（无需复制脚本到工作区）。**用后台任务跑**（每域名约 15s，含 10s DNS 等待，几十个域名要几分钟）：
 
 ```bash
-uv run batch_add_gsc.py
+uv run ${CLAUDE_PLUGIN_ROOT}/skills/batch-add-gsc/scripts/batch_add_gsc.py --domains a.com b.com
+# 强制重新浏览器授权：
+uv run ${CLAUDE_PLUGIN_ROOT}/skills/batch-add-gsc/scripts/batch_add_gsc.py --reauth --domains a.com
 ```
 
-默认会先尝试使用 1Password 中已有的 Google OAuth 授权；只有当授权失效、refresh_token 不可用，或用户明确要求重登时，才引导浏览器重新授权。
-
-如需强制重新走浏览器授权，可运行：
+脚本会把全部输出 tee 到 `./gsc/logs/<时间>.log` 并维护 `./gsc/logs/latest.log` 软链。**启动后立刻把实时查看命令给用户**（VSCode 集成终端里跑）：
 
 ```bash
-uv run batch_add_gsc.py --reauth
+tail -F ./gsc/logs/latest.log
 ```
 
-浏览器授权成功后，应把最新 token 同步回 1Password，并在本地缓存到 `.gsc_token.json`。
+并说明 Claude 也会在结束时汇报成功/失败/无 zone。
 
-**不要通过 Claude 的 Bash 工具运行长耗时脚本** — 用户看不到中间输出，会以为卡住了。
+**凭据**：默认先用 1Password 里的 Google OAuth（`client_id`/`client_secret`/`refresh_token`）；**仅当授权失效/首次**才需浏览器重授权——这一步要用户在能开浏览器的环境跑（OAuth 本地回调 8099），授权后自动同步回 1Password + 本地 `.gsc_token.json`。Cloudflare 凭据走 1Password / 环境变量。
+
+> 常规批量（已有有效 refresh_token）由 Claude 后台跑即可，用户 `tail -F` 看进度，无需手动操作。
 
 ## 脚本工作原理
 
