@@ -144,7 +144,11 @@ fire-domain-ops/
 - 用户可 `tail -f <日志>` 看实时；Claude 定期拉日志在对话里汇报关键进度 + 结束汇总。
 - 后端异步动作（`batchAddDomains`）无脚本级进度 → Claude 轮询 `appDomainManager/list` 回查 "X/N 已落库"。
 
-改造 `batch-add-gsc`：接 `RunLog`，每域名打印 `[i/N] domain 取TXT/写CF/校验/注册 ✅|❌`，默认后台+日志运行；保留手动运行兼容。
+改造 `batch-add-gsc`：
+- 接 `RunLog`，每域名打印 `[i/N] domain 取TXT/写CF/校验/注册 ✅|❌`，默认后台+日志运行。
+- **域名输入自动化**：支持 `--domains a.com b.com` 与 `--from <file>`；`domains.txt` 改为按需**自动创建并写入**（内容来自流程/给定清单），不再要用户手填；保留手填入口作兼容。
+- 路径统一：域名清单默认 `./gsc/domains.txt`，日志 `./gsc/logs/`。
+- 由 Claude 后台运行；不再强制"必须用户在终端手动跑"。
 
 ## 9. 三个 skill 流程
 
