@@ -9,14 +9,9 @@
   },
   "plugins": [
     {
-      "name": "huozhong-domain-ops",
-      "source": "./huozhong-domain-ops",
-      "description": "火种域名运维:firepikata 库存盘点 + Google 风险/存活检测 + 批量加 GSC"
-    },
-    {
-      "name": "fire-bt-ops",
-      "source": "./fire-bt-ops",
-      "description": "Fire 43+ 台宝塔面板批量管理:站点匹配/域名同步/漂移检测,会话开启自动 sync"
+      "name": "fire-domain-ops",
+      "source": "./fire-domain-ops",
+      "description": "Fire 域名运维一体化:firepikata 盘点/加域名/分配 + 宝塔批量管理 + GSC,会话自动 sync"
     }
   ]
 }
