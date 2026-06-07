@@ -56,22 +56,30 @@ OAUTH_PORT = 8099                               # Local port for OAuth redirect
 OAUTH_CLIENT_ID = ""       # e.g. "123456-xxx.apps.googleusercontent.com"
 OAUTH_CLIENT_SECRET = ""   # e.g. "GOCSPX-xxx"
 
-# Google OAuth — Method C: 1Password (store refresh_token + client credentials)
-# Item fields: "client_id", "client_secret", "refresh_token"
-OP_GOOGLE_ITEM = ""        # 1Password item UUID or name for Google OAuth
+# 1Password 引用 ID（账号/vault/CF item/Google item）不硬编码进插件（仓库可能公开）。
+# 按优先级读取： 环境变量  >  ~/.fire/gsc.json（GSC_CONFIG 可覆盖路径）  >  空
+# ~/.fire/gsc.json 示例：
+#   {"op_account":"<account-id>","op_vault":"<vault>",
+#    "op_cf_item":"<cloudflare item id>","op_google_item":"<google oauth item id>"}
+# 对应 1Password item 字段：CF → username + "API key"；Google → client_id/client_secret/refresh_token
+def _load_gsc_op_config():
+    cfg = {}
+    p = Path(os.environ.get("GSC_CONFIG") or os.path.expanduser("~/.fire/gsc.json"))
+    try:
+        if p.exists():
+            cfg = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    pick = lambda env, key: (os.environ.get(env) or cfg.get(key) or "")
+    return (
+        pick("GSC_OP_ACCOUNT", "op_account"),
+        pick("GSC_OP_VAULT", "op_vault"),
+        pick("GSC_OP_CF_ITEM", "op_cf_item"),
+        pick("GSC_OP_GOOGLE_ITEM", "op_google_item"),
+    )
 
-# Cloudflare credentials — choose ONE method in get_cf_credentials() below
-# Method A: 1Password op CLI (recommended)
-OP_ACCOUNT = ""    # 1Password account ID
-OP_ITEM = ""       # Item UUID or name (Cloudflare)
-OP_VAULT = ""      # Vault name
-
-# Method B: Environment variables
-# Set CF_EMAIL and CF_API_KEY before running
-
-# Method C: Direct (not recommended for shared scripts)
-# CF_EMAIL_DIRECT = ""
-# CF_API_KEY_DIRECT = ""
+OP_ACCOUNT, OP_VAULT, OP_ITEM, OP_GOOGLE_ITEM = _load_gsc_op_config()
+# Cloudflare 也可用环境变量 CF_EMAIL / CF_API_KEY（get_cf_credentials 内回退）
 # ──────────────────────────────────────────────────────
 
 SCOPES = [
