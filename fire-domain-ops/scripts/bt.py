@@ -388,8 +388,8 @@ def _collect_sites_for_pattern(opener, meta, panels, pattern, exclude_hosts=None
 
 def cmd_add_domain(args, meta, panels):
     """加域名到 fNNN_app 站点。默认 dry-run；--apply 才调 API。"""
-    if args.branch.startswith('f'):
-        pattern = args.branch
+    if re.match(r'^[a-zA-Z]', args.branch):
+        pattern = args.branch                         # 完整站点名(f007_app / ptn007_app / f065)
     else:
         pattern = f"f{args.branch}_app" if not args.backend else f"f{args.branch}"
     opener = make_opener(meta.get('proxy'))
@@ -467,7 +467,7 @@ def cmd_add_domain(args, meta, panels):
 def cmd_sync_domains(args, meta, panels):
     """把匹配站点的域名做并集，补齐每个物理机缺的域名。需 --apply。"""
     opener = make_opener(meta.get('proxy'))
-    if args.pattern.startswith('f'):
+    if re.match(r'^[a-zA-Z]', args.pattern):
         pattern = args.pattern
     else:
         pattern = f"f{args.pattern}_app"
