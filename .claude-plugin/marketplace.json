@@ -1,11 +1,11 @@
 {
-  "name": "funnypcc",
+  "name": "fire-tools",
   "owner": {
     "name": "FunnyPCC",
     "url": "https://github.com/FunnyPCC"
   },
   "metadata": {
-    "description": "FunnyPCC's Claude Code plugins"
+    "description": "Fire 项目 Claude Code 工具插件合集（域名运维、宝塔批量管理、GSC 等，后续可加更多）"
   },
   "plugins": [
     {
