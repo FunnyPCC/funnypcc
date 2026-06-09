@@ -48,9 +48,13 @@ description: Use when the user wants to batch-add domains to Google Search Conso
 
 **op 桌面集成可用 → Claude 可直接后台运行**（常规批量无需用户在终端跑）。注意：`op whoami` 可能显示"未登录"，但只要 1Password 桌面 app 解锁且开了 CLI 集成，`op item get --account <id> --reveal` 就能读值；首次/冷启动偶发 TLS 握手超时，**重试一次**即可。仅**首次/refresh_token 失效**时才需用户在能开浏览器的终端重新授权（8099 回调）。
 
-禁止硬编码密钥，始终优先从 1Password 获取。
+禁止硬编码密钥。**凭证值本地缓存，只有首次/失效才回 1Password**（v1.0.6+）：脚本取到 CF / Google 凭证后写入 `~/.fire/.gsc_cf_cache.json` 和 `~/.fire/.gsc_token.json`（跨插件版本保留），之后每次运行**直接读本地缓存、不再弹 1Password 授权框**。缓存鉴权失效（CF `/user` 失败 / Google refresh 报错）时自动回退 1Password 重取并刷新缓存。`~/.fire/gsc.json` 里放的仍只是 op **引用 ID**，密钥值本身只在 1Password + 本地缓存。
 
-默认按这个顺序处理 Google 授权：
+> 想强制重新从 1Password 取：删掉对应缓存文件即可（`rm ~/.fire/.gsc_cf_cache.json` 或 `~/.fire/.gsc_token.json`）；强制 Google 浏览器重授权用 `--reauth`。
+
+默认按这个顺序处理 Google 授权（**本地缓存 > 1Password > 浏览器**）：
+
+0. **先读本地 token 缓存 `~/.fire/.gsc_token.json`**（含 refresh_token，可自刷新）——命中则零 1Password 交互
 
 1. **先检查 1Password 里的 Google OAuth item**
    - item 需包含：`client_id`、`client_secret`、`refresh_token`
@@ -124,7 +128,7 @@ tail -F ./gsc/logs/latest.log
 
 并说明 Claude 也会在结束时汇报成功/失败/无 zone。
 
-**凭据**：默认先用 1Password 里的 Google OAuth（`client_id`/`client_secret`/`refresh_token`）；**仅当授权失效/首次**才需浏览器重授权——这一步要用户在能开浏览器的环境跑（OAuth 本地回调 8099），授权后自动同步回 1Password + 本地 `.gsc_token.json`。Cloudflare 凭据走 1Password / 环境变量。
+**凭据**：常规运行**直接读本地缓存（`~/.fire/.gsc_token.json` + `~/.gsc_cf_cache.json`），不弹 1Password**。首次/缓存失效才回 1Password 取一次并刷新缓存；只有 Google refresh_token 也失效时才需浏览器重授权（`--reauth`，OAuth 本地回调 8099，要在能开浏览器的环境跑），授权后自动同步回 1Password + 本地缓存。
 
 > 常规批量（已有有效 refresh_token）由 Claude 后台跑即可，用户 `tail -F` 看进度，无需手动操作。
 

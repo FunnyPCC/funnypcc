@@ -50,7 +50,10 @@ SCRIPT_DIR = Path(__file__).parent
 OAUTH_JSON = SCRIPT_DIR / "OAuth.json"         # Path to Google OAuth client credentials JSON
 DOMAIN_FILE = Path("./gsc/domains.txt")         # 域名清单(CWD 相对; --domains 会自动写入)
 LOG_DIR = Path("./gsc/logs")                    # 运行日志目录(可 tail -F latest.log)
-TOKEN_FILE = SCRIPT_DIR / ".gsc_token.json"     # Cached OAuth token (auto-generated)
+# 凭证缓存放全局 ~/.fire（跨插件版本保留；只有首次/失效才回 1Password）
+CACHE_DIR = Path(os.path.expanduser("~/.fire"))
+TOKEN_FILE = CACHE_DIR / ".gsc_token.json"        # Cached Google OAuth token (优先于 1Password)
+CF_CACHE_FILE = CACHE_DIR / ".gsc_cf_cache.json"  # Cached Cloudflare creds (优先于 1Password)
 DNS_WAIT_SECONDS = 10                           # Seconds to wait for DNS propagation
 OAUTH_PORT = 8099                               # Local port for OAuth redirect
 
@@ -109,38 +112,82 @@ def bold(t):   return _paint("1", t)
 def dim(t):    return _paint("2", t)
 
 
-def get_cf_credentials():
-    """
-    Get Cloudflare email and Global API Key.
-    Uncomment the method that matches your setup.
-    """
-    # ── Method A: 1Password ──
-    if OP_ACCOUNT and OP_ITEM:
-        print("  Reading Cloudflare credentials from 1Password...")
-        try:
-            op_base = ["op", "item", "get", OP_ITEM, "--account", OP_ACCOUNT, "--reveal"]
-            if OP_VAULT:
-                op_base += ["--vault", OP_VAULT]
-            email = subprocess.check_output(op_base + ["--fields", "username"], text=True).strip()
-            api_key = subprocess.check_output(op_base + ["--fields", "API key"], text=True).strip()
-            return email, api_key
-        except subprocess.CalledProcessError as e:
-            print(f"  1Password error: {e}")
-            print("  Make sure you've run: op signin --account " + OP_ACCOUNT)
-            sys.exit(1)
+def _load_cf_cache():
+    """Read cached Cloudflare creds from ~/.fire (no 1Password popup)."""
+    try:
+        if CF_CACHE_FILE.exists():
+            d = json.loads(CF_CACHE_FILE.read_text(encoding="utf-8"))
+            if d.get("email") and d.get("api_key"):
+                return d["email"], d["api_key"]
+    except Exception:
+        pass
+    return None
 
-    # ── Method B: Environment variables ──
+
+def _save_cf_cache(email, api_key):
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        CF_CACHE_FILE.write_text(
+            json.dumps({"email": email, "api_key": api_key}), encoding="utf-8"
+        )
+        try:
+            os.chmod(CF_CACHE_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+
+def _cf_auth_ok(email, api_key):
+    """Cheap online check that Cloudflare creds still work (no 1Password popup)."""
+    try:
+        r = requests.get(f"{CF_API}/user", headers=cf_headers(email, api_key), timeout=15)
+        return bool(r.json().get("success"))
+    except Exception:
+        return False
+
+
+def _cf_from_1password():
+    if not (OP_ACCOUNT and OP_ITEM):
+        return None
+    print("  Reading Cloudflare credentials from 1Password...")
+    try:
+        op_base = _op_base(OP_ITEM)
+        email = subprocess.check_output(op_base + ["--fields", "username"], text=True).strip()
+        api_key = subprocess.check_output(op_base + ["--fields", "API key"], text=True).strip()
+        return email, api_key
+    except subprocess.CalledProcessError as e:
+        print(f"  1Password error: {e}")
+        print("  Make sure the 1Password desktop app is unlocked (CLI integration on).")
+        return None
+
+
+def get_cf_credentials():
+    """Cloudflare email + Global API Key.
+
+    优先级：本地缓存(~/.fire/.gsc_cf_cache.json) > 1Password > 环境变量。
+    只有缓存缺失或鉴权失效时才回 1Password；取到后写回本地缓存，下次直接用，不再弹 1Password。
+    """
+    # ── 1) 本地缓存（常规路径，不弹 1Password）──
+    cached = _load_cf_cache()
+    if cached and _cf_auth_ok(*cached):
+        print("  Cloudflare credentials from local cache (~/.fire)")
+        return cached
+
+    # ── 2) 1Password（首次 / 缓存失效）──
+    fetched = _cf_from_1password()
+    if fetched and _cf_auth_ok(*fetched):
+        _save_cf_cache(*fetched)
+        return fetched
+
+    # ── 3) 环境变量 CF_EMAIL / CF_API_KEY ──
     email = os.environ.get("CF_EMAIL")
     api_key = os.environ.get("CF_API_KEY")
     if email and api_key:
+        _save_cf_cache(email, api_key)
         return email, api_key
 
-    # ── Method C: Direct (uncomment and fill in above) ──
-    # if CF_EMAIL_DIRECT and CF_API_KEY_DIRECT:
-    #     return CF_EMAIL_DIRECT, CF_API_KEY_DIRECT
-
-    print("ERROR: No Cloudflare credentials configured.")
-    print("Edit get_cf_credentials() in this script — see comments for options.")
+    print("ERROR: No working Cloudflare credentials (本地缓存/1Password/环境变量 都失败).")
     sys.exit(1)
 
 
@@ -208,9 +255,26 @@ def _sync_refresh_token_to_1password(refresh_token):
 
 
 def google_auth(force_reauth=False):
-    """Google OAuth 2.0 — prefer 1Password, then re-authorize in browser if needed."""
+    """Google OAuth 2.0.
+
+    优先级：本地 token 缓存(~/.fire/.gsc_token.json) > 1Password > 浏览器授权。
+    本地 token 自带 refresh_token，可自刷新，常规运行完全不碰 1Password。
+    """
     from google.auth.transport.requests import Request
 
+    # ── 1) 本地 token 缓存（自刷新，不弹 1Password）──
+    if not force_reauth and TOKEN_FILE.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+            if creds and creds.refresh_token:
+                creds.refresh(Request())
+                TOKEN_FILE.write_text(creds.to_json())
+                print("  Google auth ready (from local cache ~/.fire)")
+                return creds
+        except Exception as e:
+            print(f"  Local Google token invalid ({e}); falling back to 1Password...")
+
+    # ── 2) 1Password（首次 / token 缓存失效 / --reauth）──
     op_fields = _google_auth_fields_from_1password()
     creds = None
 
@@ -251,6 +315,7 @@ def google_auth(force_reauth=False):
         flow = _build_oauth_flow()
         creds = flow.run_local_server(port=OAUTH_PORT, prompt="consent")
 
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     TOKEN_FILE.write_text(creds.to_json())
     print("  Google auth ready")
 
