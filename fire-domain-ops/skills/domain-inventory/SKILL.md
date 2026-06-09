@@ -30,19 +30,27 @@ description: Use when the user wants to know which project a domain belongs to (
 
 ## 工作规则(重要)
 
-- **懒触发刷新,无定时**:用户提域名相关任务、且 `域名维护/raw_domains.json` 修改时间 ≥1 天前 → 先 `rebuild_domains.sh` 再答(`stat -f %m` 比对);没相关任务就不更新。
-- **可访问性按需**:不随重拉跑;仅当用户要检测、或要列某项目「可用域名」时,对相关域名跑 `liveness_check.py`。
-- **只查域名状态=正常**:risk/liveness 全量模式只测 `status_dictText==正常` 的;已关闭/维护中不检查。
-- **可用口径** = 域名状态正常 + Google无风险 + 能打开(列「可用域名」时按此过滤,带 `https://` 前缀)。
+- **指纹探针决定重拉还是用快照(取代旧的"≥1天 mtime"猜测)**:用户提域名相关任务时,先跑 `freshness_probe.py`(便宜:`fire_login.py` 缓存 token + 4 个 1 行 list 请求)拿后台"版本指纹"和本地 `.freshness.json` 比对——
+  - 退出码 **0 = FRESH** → 后台没变,**直接用快照**,不重拉。
+  - 退出码 **10 = STALE** → 后台有增/删/改 → 先 `rebuild_domains.sh` 再答(rebuild 末尾会刷新 marker)。
+  - 退出码 **2 = token 失效** → `fire_login.py --fresh` 换 token 后重拉(或直接重拉,rebuild 自带登录)。
+  指纹/表 = `(total, maxUpdate, maxCreate)`:total 抓增删、maxUpdate 抓就地编辑(已验证改状态会 bump updateTime)、maxCreate 补强新增。这比 mtime 可靠——mtime 只代表"我上次拉取时间",探针直接比后台真实状态,**用户在别处静默改的也能发现**。用户若主动说改了后台,可跳过探针直接重拉。
+- **风险+存活按需现查(实时,不读快照旧值)**:列某项目「可用域名」、或用户要查风险/存活时,对相关域名**现跑** `risk_check.py` + `liveness_check.py`;**不**读 `域名风险.csv`/`域名存活.csv` 的旧值。重拉(rebuild)仍会全量刷风险写进快照,但**可用判定一律以现查为准**。
+- **只查域名状态=正常**:risk/liveness 只测 `status_dictText==正常` 的;已关闭/维护中不检查。
+- **可用口径** = 域名状态正常(快照) + Google无风险(**实时**) + 能打开(**实时**);列「可用域名」时按此过滤,带 `https://` 前缀。
+- **答复必须标注数据来源与时效**:凡引用域名**归属 / 状态(正常/关闭)** 的结论(来自快照),注明「来自快照 + `raw_domains.json` 修改时间」;风险/存活注明为**实时现查**。注:跑过探针判 FRESH 时,快照==后台,可标「已探针校验与后台一致 @ 时间」,可信度更高。
 - **关联**:`域名.appId == 项目.id` → projectCode;取不到标(未绑定项目)/(已删除项目·<id>)。
 
 ## 命令(在项目根运行)
 
 ```bash
 PLUGIN="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/fire-tools/fire-domain-ops}"
-# 一键重建(自动登录→抓取→风险→合并;不跑存活)
+# 新鲜度探针:先判要不要重拉(退出码 0=FRESH/10=STALE/2=token失效)
+FIRE_TOKEN="$(uv run "$PLUGIN/skills/domain-inventory/scripts/fire_login.py")" \
+  uv run "$PLUGIN/skills/domain-inventory/scripts/freshness_probe.py"
+# 一键重建(自动登录→抓取→风险→合并→写 .freshness.json;不跑存活)
 bash "$PLUGIN/skills/domain-inventory/scripts/rebuild_domains.sh"
-# 只取一个新 token
+# 只取 token(JWT 自带缓存,~3天内复用不过验证码;--fresh 强制重登)
 uv run "$PLUGIN/skills/domain-inventory/scripts/fire_login.py"
 # 风险 / 存活:不带参=全量(仅域名状态正常);带域名=只测这些
 uv run "$PLUGIN/skills/domain-inventory/scripts/risk_check.py" a.com b.com
@@ -52,10 +60,12 @@ uv run "$PLUGIN/skills/domain-inventory/scripts/liveness_check.py" a.com b.com
 
 ## 列某项目「可用域名」的标准流程
 
-1. 必要时先按懒触发规则重拉。
-2. 从 `域名项目关联.csv` 取该项目「域名状态=正常 且 Google风险=正常」的候选。
-3. 对候选跑 `liveness_check.py`(现查存活)。
-4. 输出「域名正常 + 无风险 + 能打开」的,带 `https://`。
+1. 先跑 `freshness_probe.py`:STALE→`rebuild_domains.sh` 再继续,FRESH→直接用快照(用户主动说改了后台则跳过探针直接重拉);**归属/状态来自快照**。
+2. 从快照取该项目「域名状态=正常」的候选(状态/归属是快照值)。
+3. 对候选**现跑** `risk_check.py`(实时风险,**不读** `域名风险.csv` 旧值)→ 剔除有风险的。
+4. 对剩余候选**现跑** `liveness_check.py`(实时存活)→ 剔除打不开的。
+5. 输出「状态正常(快照) + 实时无风险 + 实时能打开」的,带 `https://`。
+6. **答复中标注**:风险/存活是**实时现查**;域名状态/归属来自**快照 + `raw_domains.json` 修改时间**,让用户自行判断要不要重拉。
 
 ## 关键事实
 

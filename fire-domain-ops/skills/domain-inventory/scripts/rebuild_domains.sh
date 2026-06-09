@@ -19,5 +19,7 @@ echo "③ Safe Browsing 风险检测(仅域名状态=正常)…"
 uv run "$HERE/risk_check.py"
 echo "④ 合并生成主关联表…"
 uv run "$HERE/build_doc.py"
-echo "✅ 完成。产物在 ./域名维护/:域名项目关联.{md,csv}、域名风险.{md,csv}、raw_*.json"
+echo "⑤ 记录快照指纹(.freshness.json,供探针比对)…"
+uv run "$HERE/freshness_probe.py" --seed
+echo "✅ 完成。产物在 ./域名维护/:域名项目关联.{md,csv}、域名风险.{md,csv}、raw_*.json、.freshness.json"
 echo "   (可访问性按需:uv run \"$HERE/liveness_check.py\" [域名...])"
