@@ -9,9 +9,14 @@ firepikata 域名分配运维 —— 共享脚本（流程1 加域名 / 流程2 
 故本脚本只依赖 requests；所有请求带 X-Access-Token。
 
 子命令：
-  spare                                  统计待分配空域名（项目空+备注空+状态正常），按 TLD 分组
+  spare [--tld com] [--list] [--limit N] [--all-ages]          查待分配空域名;默认按 TLD 计数,--list 列具体域名
   add [--project P] [--ip IP] [--cf ACC] [--apply] DOMAIN...   给项目/备用加域名（batchAddDomains）
-  allocate --project P --count N [--cf ACC] [--apply]          给项目分配 N 个空域名（优先 .com）
+  allocate --project P --count N [--cf ACC] [--all-ages] [--apply]   给项目分配 N 个空域名（优先 .com）
+
+域名分配铁律(spare/allocate 默认生效)：
+  ① 只取**创建 ≤6 个月**的空域名（更老的可能临近过期/被风控）；
+  ② 同窗口内**优先取老的**（createTime 升序）——把临近过期的先用掉。
+  需要更老的(应急)时显式加 --all-ages。
 
 默认 dry-run；加 --apply 才真正提交。写操作带日志(见 lib/runlog.py)，可 tail -F。
 """
@@ -23,6 +28,7 @@ try: sys.stdout.reconfigure(encoding="utf-8"); sys.stderr.reconfigure(encoding="
 except Exception: pass
 import time
 from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -46,6 +52,7 @@ BASE = "https://firepikatacommon.huozhongtech.org"
 UA = "fire-domain-ops/app_domains"
 SPARE_IP = "128.241.233.59"          # 备用域名默认 IP
 DEFAULT_CF = "hualee887@gmail.com"   # 默认 Cloudflare 账号
+SPARE_MAX_AGE_MONTHS = 6             # 域名分配铁律:只取「创建≤6个月」的空域名(更老的可能临近过期/被风控)
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT / "lib"))
@@ -152,6 +159,35 @@ def spare_pool(domains):
     return pool
 
 
+def _created_dt(d):
+    """解析 createTime('YYYY-MM-DD HH:MM:SS')→datetime;解析失败返回 None。"""
+    s = (d.get("createTime") or "").strip()[:19]
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    return None
+
+
+def eligible_spare(domains, months=SPARE_MAX_AGE_MONTHS, all_ages=False, tld_filter=None):
+    """空域名分配候选 —— 应用「域名分配铁律」(见 README-domain.md):
+      ① 只取**创建 ≤ months 个月**的(更老的可能临近过期/被风控);`all_ages=True` 关闭此限。
+      ② 同窗口内**优先取老的**(createTime 升序)——把临近过期的先用掉。
+    无 createTime 的:限龄时排除(无法确认年龄,保守),不限龄时垫底。
+    `tld_filter` 可只留某后缀(如 'com')。返回已按①②筛序的列表。
+    """
+    pool = spare_pool(domains)
+    if tld_filter:
+        suf = tld_filter.lower().lstrip(".")
+        pool = [d for d in pool if tld(d.get("domain", "")) == suf]
+    if not all_ages:
+        cutoff = datetime.now() - timedelta(days=months * 30)
+        pool = [d for d in pool if (_created_dt(d) or datetime.min) >= cutoff]
+    pool.sort(key=lambda d: _created_dt(d) or datetime.max)  # 优先取老的
+    return pool
+
+
 def clean_domains(args):
     seen, out = set(), []
     for a in args:
@@ -196,13 +232,30 @@ def verify_landed(token, domains, rounds=12, gap=5):
 def cmd_spare(args):
     token = get_token()
     domains = fetch_list(token, "/api/app/appDomainManager/list", 2000)
-    pool = spare_pool(domains)
-    c = Counter(tld(d["domain"]) for d in pool if d.get("domain"))
-    print(f"待分配空域名（项目空 + 备注空 + 状态正常）：共 {len(pool)} 个")
-    for suf, n in sorted(c.items(), key=lambda x: -x[1]):
-        print(f"  {suf}: {n} 个")
-    if not pool:
-        print("  （当前没有空域名）")
+    all_ages = getattr(args, "all_ages", False)
+    tldf = getattr(args, "tld", None)
+    total = len(spare_pool(domains))
+    pool = eligible_spare(domains, all_ages=all_ages, tld_filter=tldf)  # 已按「≤6月+优先取老」筛序
+    scope = "全部年龄" if all_ages else f"创建≤{SPARE_MAX_AGE_MONTHS}个月"
+    head = f"待分配空域名（项目空+备注空+状态正常 | {scope}"
+    if tldf:
+        head += f" | .{tldf.lower().lstrip('.')}"
+    head += f"）：{len(pool)} 个  (空池总计 {total} 个)"
+    print(head)
+    if getattr(args, "list", False):
+        lim = getattr(args, "limit", None) or len(pool)
+        print(f"  ↓ 优先取老的(createTime 升序)，前 {min(lim, len(pool))} 个：")
+        for d in pool[:lim]:
+            print(f"  {d.get('domain')}  | id={d.get('id')} | 建={d.get('createTime')} | ip={d.get('ip')}")
+        if not pool:
+            print("  （无符合条件的空域名）")
+    else:
+        c = Counter(tld(d["domain"]) for d in pool if d.get("domain"))
+        for suf, n in sorted(c.items(), key=lambda x: -x[1]):
+            print(f"  {suf}: {n} 个")
+        if not pool:
+            print("  （无符合条件的空域名）")
+        print("  提示：加 --list [--tld com] [--limit N] 看具体域名（按规则优先取老）；--all-ages 放宽年龄。")
 
 
 # ---------- 流程1：add ----------
@@ -260,12 +313,13 @@ def cmd_allocate(args):
     cf_id, cf_acc = resolve_cf(token, args.cf)  # 解析以备校验（editBatch 不需要，但确认账号存在）
 
     domains = fetch_list(token, "/api/app/appDomainManager/list", 2000)
-    pool = spare_pool(domains)
-    com = [d for d in pool if tld(d.get("domain", "")) == "com"]
+    all_ages = getattr(args, "all_ages", False)
+    com = eligible_spare(domains, all_ages=all_ages, tld_filter="com")  # 「≤6月+优先取老」筛序
     n = args.count
     if len(com) < n:
-        sys.exit(f"⛔ .com 空域名只有 {len(com)} 个，不足 {n} 个。"
-                 f"（空域名池共 {len(pool)} 个）请减少数量或确认是否用其他后缀。")
+        scope = "全部年龄" if all_ages else f"创建≤{SPARE_MAX_AGE_MONTHS}个月"
+        sys.exit(f"⛔ 符合条件的 .com 空域名只有 {len(com)} 个（{scope}），不足 {n} 个。"
+                 f" 可加 --all-ages 放宽年龄，或减少数量。")
     chosen = com[:n]
     ids = [d["id"] for d in chosen]
     names = [d["domain"] for d in chosen]
@@ -273,7 +327,7 @@ def cmd_allocate(args):
     rl = RunLog("allocate-domains")
     rl.header(f"流程3 分配 {n} 个空域名 {'[APPLY]' if args.apply else '[DRY-RUN]'}")
     rl.log(f"项目: {proj['projectCode']}（{proj['name']}, appId={app_id}）  目标IP(appIp): {app_ip}")
-    rl.log(f"选中(.com {n}): {', '.join(names)}")
+    rl.log(f"选中(.com {n} | ≤{SPARE_MAX_AGE_MONTHS}月+优先取老): {', '.join(names)}")
     if not args.apply:
         rl.log("→ DRY-RUN：未提交。确认后加 --apply 执行。")
         print("\n" + rl.tail_cmd())
@@ -317,7 +371,11 @@ def main():
     ap = argparse.ArgumentParser(description="firepikata 域名分配运维")
     sub = ap.add_subparsers(dest="subcmd", required=True)
 
-    sp = sub.add_parser("spare", help="统计待分配空域名（按 TLD）")
+    sp = sub.add_parser("spare", help="查待分配空域名(默认按 TLD 计数;--list 列具体域名,优先取老)")
+    sp.add_argument("--list", action="store_true", help="列出具体域名(createTime 升序,优先取老)而非只计数")
+    sp.add_argument("--tld", help="只看某后缀(如 com)")
+    sp.add_argument("--limit", type=int, help="--list 时最多列出多少个")
+    sp.add_argument("--all-ages", action="store_true", help=f"放宽:含创建>{SPARE_MAX_AGE_MONTHS}个月的(默认只取≤{SPARE_MAX_AGE_MONTHS}月)")
     sp.set_defaults(func=cmd_spare)
 
     ad = sub.add_parser("add", help="给项目/备用加域名")
@@ -332,6 +390,7 @@ def main():
     al.add_argument("--project", required=True, help="项目号（数字，模糊匹配）")
     al.add_argument("--count", type=int, required=True, help="分配数量 N")
     al.add_argument("--cf", default=DEFAULT_CF, help=f"CF账号（默认 {DEFAULT_CF}）")
+    al.add_argument("--all-ages", action="store_true", help=f"放宽:含创建>{SPARE_MAX_AGE_MONTHS}个月的(默认只取≤{SPARE_MAX_AGE_MONTHS}月+优先取老)")
     al.add_argument("--apply", action="store_true", help="真提交（默认 dry-run）")
     al.set_defaults(func=cmd_allocate)
 

@@ -10,6 +10,14 @@
 | `batch-add-gsc` | 批量加域名到 Google Search Console(Cloudflare DNS TXT 验证) | 自动 |
 | `baota-site-mgmt` | 宝塔面板批量站点 / 域名管理(*规划中,从 fire-bt-ops 并入*) | — |
 
+## 域名分配铁律（spare / allocate 默认强制）
+
+1. **只取创建 ≤6 个月**的空域名（更老的可能临近过期 / 被风控）。
+2. 同窗口内**优先取老的**（createTime 升序）——把临近过期的先用掉。
+3. 应急放宽：`--all-ages`。看具体候选：`app_domains.py spare --tld com --list [--limit N]`。
+
+> 实现在 `scripts/app_domains.py` 的 `SPARE_MAX_AGE_MONTHS` + `eligible_spare()`，`spare` / `allocate` 共用。
+
 ## 凭证策略(全工具箱通用)
 
 **1Password 是源,本地是缓存。** `lib/op_secrets.py`:环境变量 > 本地缓存 > 1Password(取出后写回缓存);失效/过期自动 `refresh` 回 1P。缓存默认 **全局** `~/.fire/secrets.json`(0600,跨项目复用、不会落进业务 git 仓库;旧版 CWD 相对 `gsc/.secrets.json` 仍只读兼容,`DOMAIN_SECRETS` 可覆盖)。**插件 repo 不含任何密钥**。逃生口:op 连不上时直接走 `SB_API_KEY` / `FIRE_USER`+`FIRE_PASS` 环境变量。解决「每次用都要 op 授权」的痛点。
